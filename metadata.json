@@ -1,0 +1,8 @@
+{
+  "name": "Remix: 笔试AI助手",
+  "description": "An AI-powered exam assistant for quantitative reasoning, problem solving, OCR math recognition, and mistake tracking.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
