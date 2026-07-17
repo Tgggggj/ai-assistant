@@ -1,47 +1,43 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://ai.google.dev/static/site-assets/images/share-ais-513315318.png" />
-</div>
+# 笔试 AI 助手
 
-# 笔试 AI 助手全栈应用
+一款面向备考场景的 AI 智能刷题与学习辅助工具。支持模拟练习、拍照搜题、AI 解析和错题复盘。
 
-这是一个 Vite + React 前端和 Express + Supabase 后端组成的一体化应用。
+## 功能概览
 
-View your app in AI Studio: https://ai.studio/apps/f4e42d5b-347f-4d03-989b-a0ce78eaed5d
+| 模块 | 功能 |
+|------|------|
+| **📊 仪表盘** | 考试倒计时、学习进度环形图、快速操作入口、最近活动、AI 洞察建议 |
+| **📝 模拟练习** | 计时答题、选项交互、草稿记录、提交即时反馈、解题步骤解析、20 题一套自动结算 |
+| **📸 拍照搜题** | 图片题目识别、AI 分步解析、加入错题本、相似题型推荐 |
+| **📖 错题本** | 按学科筛选、关键词搜索、AI 弱点诊断（正确率趋势）、错题回顾 |
 
-## Run Locally
+## 技术栈
 
-**Prerequisites:** Node.js、Supabase 项目
+**前端** — React 19 / TypeScript / Vite 6 / Tailwind CSS 4 / Lucide React
 
-1. 在 Supabase SQL Editor 中执行 `supabase/schema.sql`，创建表并写入演示数据。
-2. 复制 `.env.example` 为 `.env.local`，填写：
-   - `SUPABASE_URL`
-   - `SUPABASE_SERVICE_ROLE_KEY`
-   - 可选：`PORT`、`VITE_API_BASE_URL`、`VITE_API_PROXY_TARGET`
-3. 安装依赖：
-   `npm install`
-4. 同时启动前端和后端：
-   `npm run dev:full`
-5. 打开：
-   `http://localhost:3000`
+**后端** — Express.js / Supabase (PostgreSQL) / tsx
 
-## API
+**测试** — Vitest + Supertest（6 个集成测试）
 
-后端默认运行在 `http://localhost:8787`，Vite 会把 `/api/*` 代理过去。
+## 快速开始
 
-- `GET /api/dashboard`
-- `PATCH /api/profile`
-- `GET /api/practice/session`
-- `POST /api/practice/submit`
-- `GET /api/mistakes`
-- `GET /api/camera/analysis`
-- `POST /api/mistakes/from-scan`
-- `POST /api/camera/search-similar`
+### 前置条件
 
-## Production
+- Node.js >= 22
+- Supabase 项目（可选 — 不配置时使用内置本地 fallback 数据）
 
-1. 构建前端：
-   `npm run build`
-2. 启动 Express：
-   `npm start`
+### 安装与运行
 
-当 `dist/index.html` 存在时，Express 会同时托管前端静态文件和 `/api/*` 后端接口。
+```bash
+# 1. 安装依赖
+npm install
+
+# 2. 配置环境变量
+cp .env.example .env.local
+# 编辑 .env.local 填写 SUPABASE_URL 和 SUPABASE_SERVICE_ROLE_KEY
+
+# 3. 初始化数据库（可选）
+# 在 Supabase SQL Editor 中执行 supabase/schema.sql
+
+# 4. 启动（前后端一体）
+npm run dev:full
