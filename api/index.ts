@@ -1,4 +1,4 @@
-import app from '../server/index';
+import app from '../server/index.js';
 import type { Request, Response } from 'express';
 
 function normalizeRewrittenUrl(req: Request) {
