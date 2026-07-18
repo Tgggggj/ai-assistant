@@ -17,7 +17,7 @@
 
 **后端** — Express.js / Supabase (PostgreSQL) / tsx
 
-**测试** — Vitest + Supertest（6 个集成测试）
+**测试** — Vitest + Supertest（8 个集成测试）
 
 ## 快速开始
 
@@ -68,7 +68,7 @@ src/
 server/
 └── index.ts                       # Express API 服务（含 Supabase 集成）
 tests/
-└── server.test.ts                 # 6 个集成测试（session / submit / next-set / dashboard）
+└── server.test.ts                 # 8 个集成测试（auth / session / submit / next-set / dashboard）
 supabase/
 └── schema.sql                     # 表结构 + 种子数据
 ```
@@ -78,6 +78,11 @@ supabase/
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/api/health` | 健康检查 |
+| POST | `/api/auth/register` | 用户注册 |
+| POST | `/api/auth/login` | 用户登录 |
+| POST | `/api/auth/refresh` | 刷新登录态 |
+| GET | `/api/auth/me` | 获取当前用户 |
+| POST | `/api/auth/logout` | 退出登录 |
 | GET | `/api/dashboard` | 仪表盘 |
 | PATCH | `/api/profile` | 更新用户名 |
 | GET | `/api/practice/session` | 获取当前练习 |
@@ -96,6 +101,8 @@ supabase/
 |------|--------|------|
 | `VITE_API_TIMEOUT_MS` | `25000` | 超时阈值 |
 | `VITE_ENABLE_LOCAL_FALLBACK` | `true` | 是否启用 fallback |
+
+登录页提供游客体验入口。游客模式直接使用本地数据，不请求受保护后端接口；注册或登录后使用 Supabase 用户数据。
 
 ## 截图
 
