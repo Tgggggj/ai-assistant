@@ -852,7 +852,7 @@ const __dirname = path.dirname(__filename);
 const distDir = path.resolve(__dirname, '..', 'dist');
 const indexHtml = path.join(distDir, 'index.html');
 
-if (fs.existsSync(indexHtml)) {
+if (!process.env.VERCEL && fs.existsSync(indexHtml)) {
   app.use(express.static(distDir));
   app.get('*', (_req, res) => {
     res.sendFile(indexHtml);
@@ -866,10 +866,11 @@ app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
   res.status(statusCode).json({ error: message });
 });
 
-if (process.env.NODE_ENV !== 'test') {
+if (process.env.NODE_ENV !== 'test' && !process.env.VERCEL) {
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`API server listening on http://localhost:${PORT}`);
   });
 }
 
+export default app;
 export { app };

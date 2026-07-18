@@ -232,6 +232,11 @@ export default function App() {
     return <AuthView onAuthenticated={handleAuthenticated} />;
   }
 
+  if (!authSession.user) {
+    api.clearAuthSession();
+    return <AuthView onAuthenticated={handleAuthenticated} />;
+  }
+
   return (
     <Layout currentView={currentView} onChangeView={setCurrentView} user={authSession.user} onLogout={handleLogout}>
       {renderView()}

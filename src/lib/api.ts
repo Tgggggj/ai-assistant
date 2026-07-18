@@ -255,14 +255,103 @@ function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
+function asRecord(value: unknown): Record<string, unknown> {
+  return value !== null && typeof value === 'object' ? (value as Record<string, unknown>) : {};
+}
+
+function asString(value: unknown, fallback: string) {
+  return typeof value === 'string' && value.trim() ? value : fallback;
+}
+
+function asNullableString(value: unknown) {
+  return typeof value === 'string' ? value : null;
+}
+
+function asNumber(value: unknown, fallback: number) {
+  const nextValue = Number(value);
+  return Number.isFinite(nextValue) ? nextValue : fallback;
+}
+
+function asStringArray(value: unknown, fallback: string[]) {
+  if (!Array.isArray(value)) return fallback;
+  return value.map((item) => String(item)).filter(Boolean);
+}
+
+function normalizeAuthSession(value: AuthSession): AuthSession {
+  const raw = asRecord(value);
+  const rawUser = asRecord(raw.user);
+  const isGuest = raw.isGuest === true;
+  const accessToken = asString(raw.accessToken, '');
+
+  if (!isGuest && !accessToken) {
+    throw new ApiRequestError('登录响应缺少访问令牌，请重试。', { canUseFallback: false });
+  }
+
+  return {
+    user: {
+      id: asString(rawUser.id, isGuest ? 'guest-user' : 'current-user'),
+      email: asNullableString(rawUser.email),
+      displayName: asString(rawUser.displayName, isGuest ? '游客' : '用户'),
+    },
+    accessToken,
+    refreshToken: asNullableString(raw.refreshToken),
+    expiresAt: raw.expiresAt === null || raw.expiresAt === undefined ? null : asNumber(raw.expiresAt, 0),
+    isGuest: isGuest ? true : undefined,
+  };
+}
+
+function normalizeDashboardData(value: DashboardData): DashboardData {
+  const fallback = getLocalDashboardSnapshot();
+  const raw = asRecord(value);
+  const rawProfile = asRecord(raw.profile);
+  const rawExam = asRecord(raw.exam);
+  const rawProgress = asRecord(raw.progress);
+  const rawInsight = asRecord(raw.insight);
+  const rawActivities = Array.isArray(raw.recentActivities) ? raw.recentActivities : fallback.recentActivities;
+
+  return {
+    profile: {
+      id: asString(rawProfile.id, fallback.profile.id),
+      displayName: asString(rawProfile.displayName, fallback.profile.displayName),
+    },
+    exam: {
+      title: asString(rawExam.title, fallback.exam.title),
+      daysLeft: asNumber(rawExam.daysLeft, fallback.exam.daysLeft),
+    },
+    progress: {
+      label: asString(rawProgress.label, fallback.progress.label),
+      completion: Math.min(100, Math.max(0, asNumber(rawProgress.completion, fallback.progress.completion))),
+      status: asString(rawProgress.status, fallback.progress.status),
+    },
+    recentActivities: rawActivities.map((activity, index) => {
+      const rawActivity = asRecord(activity);
+      const fallbackActivity = fallback.recentActivities[index] ?? fallback.recentActivities[0];
+      const rawScore = rawActivity.score;
+
+      return {
+        id: asString(rawActivity.id, fallbackActivity?.id ?? `activity-${index}`),
+        title: asString(rawActivity.title, fallbackActivity?.title ?? '学习活动'),
+        subtitle: asString(rawActivity.subtitle, fallbackActivity?.subtitle ?? ''),
+        score: rawScore === null || rawScore === undefined ? null : asNumber(rawScore, fallbackActivity?.score ?? 0),
+      };
+    }),
+    insight: {
+      title: asString(rawInsight.title, fallback.insight.title),
+      text: asString(rawInsight.text, fallback.insight.text),
+      tags: asStringArray(rawInsight.tags, fallback.insight.tags),
+      suggestedAction: asString(rawInsight.suggestedAction, fallback.insight.suggestedAction),
+    },
+  };
+}
+
 function readStoredAuthSession(): AuthSession | null {
   if (typeof window === 'undefined') return null;
 
   try {
     const raw = window.localStorage.getItem(AUTH_STORAGE_KEY);
     if (!raw) return null;
-    const parsed = JSON.parse(raw) as AuthSession;
-    if (!parsed?.user) return null;
+    const parsed = normalizeAuthSession(JSON.parse(raw) as AuthSession);
+    if (!parsed.user) return null;
     return parsed.isGuest || parsed.accessToken ? parsed : null;
   } catch {
     return null;
@@ -502,33 +591,33 @@ export const api = {
   },
 
   startGuestSession() {
-    const session = clone(GUEST_SESSION);
+    const session = normalizeAuthSession(clone(GUEST_SESSION));
     persistAuthSession(session);
     return session;
   },
 
   async register(payload: { email: string; password: string; displayName: string }) {
-    const session = await request<AuthSession>(
+    const session = normalizeAuthSession(await request<AuthSession>(
       '/auth/register',
       {
         method: 'POST',
         body: JSON.stringify(payload),
       },
       Math.max(API_TIMEOUT_MS, 5000),
-    );
+    ));
     persistAuthSession(session);
     return session;
   },
 
   async login(payload: { email: string; password: string }) {
-    const session = await request<AuthSession>(
+    const session = normalizeAuthSession(await request<AuthSession>(
       '/auth/login',
       {
         method: 'POST',
         body: JSON.stringify(payload),
       },
       Math.max(API_TIMEOUT_MS, 5000),
-    );
+    ));
     persistAuthSession(session);
     return session;
   },
@@ -536,7 +625,7 @@ export const api = {
   async refreshAuthSession() {
     if (!authSession?.refreshToken) return null;
 
-    const session = await request<AuthSession>(
+    const session = normalizeAuthSession(await request<AuthSession>(
       '/auth/refresh',
       {
         method: 'POST',
@@ -546,7 +635,7 @@ export const api = {
         },
       },
       Math.max(API_TIMEOUT_MS, 5000),
-    );
+    ));
     persistAuthSession(session);
     return session;
   },
@@ -589,7 +678,12 @@ export const api = {
   getDashboardSnapshot: getLocalDashboardSnapshot,
 
   getDashboard() {
-    return requestWithFallback<DashboardData>('/dashboard', undefined, getLocalDashboardSnapshot, Math.max(API_TIMEOUT_MS, 3000));
+    return requestWithFallback<DashboardData>(
+      '/dashboard',
+      undefined,
+      getLocalDashboardSnapshot,
+      Math.max(API_TIMEOUT_MS, 3000),
+    ).then(normalizeDashboardData);
   },
 
   updateProfile(displayName: string) {
