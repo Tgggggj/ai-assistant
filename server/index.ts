@@ -636,3 +636,10 @@ if (process.env.NODE_ENV !== 'test') {
 }
 
 export { app };
+ (process.env.NODE_ENV !== 'test') {
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`API server listening on http://localhost:${PORT}`);
+  });
+}
+
+export { app };
