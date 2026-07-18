@@ -22,16 +22,51 @@ const MIN_PASSWORD_LENGTH = 6;
 
 let cachedQuestionCount: { count: number; timestamp: number } | null = null;
 
-const supabaseUrl = process.env.SUPABASE_URL ?? process.env.VITE_SUPABASE_URL;
-const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+type SupabaseClientInstance = any;
 
-if (!supabaseUrl || !supabaseServiceRoleKey) {
-  throw new Error('Missing SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY. Copy .env.example to .env.local and fill them in.');
+let supabaseClient: SupabaseClientInstance | null = null;
+
+function getSupabaseEnv() {
+  return {
+    url: (process.env.SUPABASE_URL ?? process.env.VITE_SUPABASE_URL ?? '').trim(),
+    serviceRoleKey: (process.env.SUPABASE_SERVICE_ROLE_KEY ?? '').trim(),
+  };
 }
 
-const supabase = createClient(supabaseUrl, supabaseServiceRoleKey, {
-  auth: {
-    persistSession: false,
+function getMissingSupabaseEnv() {
+  const env = getSupabaseEnv();
+  return [
+    ['SUPABASE_URL', env.url],
+    ['SUPABASE_SERVICE_ROLE_KEY', env.serviceRoleKey],
+  ]
+    .filter(([, value]) => !value)
+    .map(([name]) => name);
+}
+
+function getSupabaseClient() {
+  const env = getSupabaseEnv();
+  const missingEnv = getMissingSupabaseEnv();
+
+  if (missingEnv.length > 0) {
+    throw new HttpError(500, `后端缺少环境变量：${missingEnv.join(', ')}`);
+  }
+
+  if (!supabaseClient) {
+    supabaseClient = createClient(env.url, env.serviceRoleKey, {
+      auth: {
+        persistSession: false,
+      },
+    });
+  }
+
+  return supabaseClient;
+}
+
+const supabase = new Proxy({} as SupabaseClientInstance, {
+  get(_target, property) {
+    const client = getSupabaseClient();
+    const value = Reflect.get(client, property, client);
+    return typeof value === 'function' ? value.bind(client) : value;
   },
 });
 
@@ -348,9 +383,11 @@ function getSelectedAnswerText(question: any, selectedOption: string) {
 }
 
 app.get('/api/health', (_req, res) => {
+  const missingEnv = getMissingSupabaseEnv();
   res.json({
-    ok: true,
-    database: 'supabase',
+    ok: missingEnv.length === 0,
+    database: missingEnv.length === 0 ? 'supabase' : 'not-configured',
+    missingEnv,
   });
 });
 
