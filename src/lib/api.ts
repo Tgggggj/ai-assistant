@@ -225,6 +225,18 @@ interface ApiErrorBody {
   error?: string;
 }
 
+class ApiRequestError extends Error {
+  readonly status?: number;
+  readonly canUseFallback: boolean;
+
+  constructor(message: string, options: { status?: number; canUseFallback: boolean; cause?: unknown }) {
+    super(message, { cause: options.cause });
+    this.name = 'ApiRequestError';
+    this.status = options.status;
+    this.canUseFallback = options.canUseFallback;
+  }
+}
+
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
@@ -385,15 +397,26 @@ async function request<T>(path: string, init?: RequestInit, timeoutMs = API_TIME
       } catch {
         // Keep the HTTP status message when the response is not JSON.
       }
-      throw new Error(message);
+      throw new ApiRequestError(message, { status: response.status, canUseFallback: false });
     }
 
     return response.json() as Promise<T>;
   } catch (error) {
-    if (error instanceof Error && error.name === 'AbortError') {
-      throw new Error('连接后端超时，已切换到本地快速数据。');
+    if (error instanceof ApiRequestError) {
+      throw error;
     }
-    throw error;
+
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new ApiRequestError('连接后端超时，已切换到本地快速数据。', {
+        canUseFallback: true,
+        cause: error,
+      });
+    }
+
+    throw new ApiRequestError('连接后端失败，已切换到本地快速数据。', {
+      canUseFallback: true,
+      cause: error,
+    });
   } finally {
     if (timeoutId !== null) window.clearTimeout(timeoutId);
     if (init?.signal) init.signal.removeEventListener('abort', abortFromCaller);
@@ -410,6 +433,7 @@ async function requestWithFallback<T>(
     return await request<T>(path, init, timeoutMs);
   } catch (error) {
     if (!ENABLE_LOCAL_FALLBACK) throw error;
+    if (error instanceof ApiRequestError && !error.canUseFallback) throw error;
     console.warn(`[api] ${path} failed; using local fallback.`, error);
     return fallback();
   }

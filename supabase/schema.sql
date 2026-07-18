@@ -49,11 +49,31 @@ begin
     select 1
     from pg_constraint
     where conname = 'practice_sessions_status_check'
+      and conrelid = 'public.practice_sessions'::regclass
   ) then
     alter table public.practice_sessions
       add constraint practice_sessions_status_check check (status in ('active', 'completed'));
   end if;
 end $$;
+
+with ranked_active_sessions as (
+  select
+    id,
+    row_number() over (partition by user_id order by updated_at desc, created_at desc, id desc) as active_rank
+  from public.practice_sessions
+  where status = 'active'
+)
+update public.practice_sessions
+set
+  status = 'completed',
+  completed_at = coalesce(completed_at, now())
+from ranked_active_sessions
+where public.practice_sessions.id = ranked_active_sessions.id
+  and ranked_active_sessions.active_rank > 1;
+
+create unique index if not exists practice_sessions_one_active_per_user
+on public.practice_sessions(user_id)
+where status = 'active';
 
 create table if not exists public.answer_attempts (
   id uuid primary key default gen_random_uuid(),

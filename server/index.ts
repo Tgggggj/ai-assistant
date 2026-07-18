@@ -13,6 +13,12 @@ const DEMO_USER_ID = process.env.DEMO_USER_ID ?? '00000000-0000-0000-0000-000000
 const DEFAULT_TOTAL_QUESTIONS = 20;
 const DEFAULT_TIME_LEFT_SECONDS = 765;
 const QUESTION_COUNT_CACHE_TTL_MS = 60_000; // 1 分钟内复用，避免每次取题都 COUNT
+const DEFAULT_CORS_ORIGINS = [
+  'http://localhost:3000',
+  'http://127.0.0.1:3000',
+  'http://localhost:5173',
+  'http://127.0.0.1:5173',
+];
 
 let cachedQuestionCount: { count: number; timestamp: number } | null = null;
 
@@ -33,11 +39,26 @@ const app = express();
 
 app.use(express.json({ limit: '1mb' }));
 app.use((req, res, next) => {
-  res.setHeader('Access-Control-Allow-Origin', process.env.CORS_ORIGIN ?? '*');
+  const allowedOrigins = (process.env.CORS_ORIGIN ?? DEFAULT_CORS_ORIGINS.join(','))
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+  const requestOrigin = req.headers.origin;
+  const corsOrigin =
+    allowedOrigins.includes('*') || !requestOrigin
+      ? allowedOrigins[0] ?? DEFAULT_CORS_ORIGINS[0]
+      : allowedOrigins.includes(requestOrigin)
+        ? requestOrigin
+        : '';
+
+  if (corsOrigin) {
+    res.setHeader('Access-Control-Allow-Origin', corsOrigin);
+    res.setHeader('Vary', 'Origin');
+  }
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, OPTIONS');
   if (req.method === 'OPTIONS') {
-    res.sendStatus(204);
+    res.sendStatus(corsOrigin ? 204 : 403);
     return;
   }
   next();
@@ -141,6 +162,24 @@ function buildPracticeSummary(params: {
   };
 }
 
+function normalizePracticeSession(row: any) {
+  const normalized = {
+    total_questions: DEFAULT_TOTAL_QUESTIONS,
+    current_index: clamp(Number(row.current_index ?? 1), 1, DEFAULT_TOTAL_QUESTIONS),
+    score: clamp(Number(row.score ?? 0), 0, DEFAULT_TOTAL_QUESTIONS),
+  };
+
+  if (
+    row.total_questions === normalized.total_questions &&
+    row.current_index === normalized.current_index &&
+    row.score === normalized.score
+  ) {
+    return null;
+  }
+
+  return normalized;
+}
+
 async function ensureProfile() {
   const { data, error } = await supabase
     .from('profiles')
@@ -174,14 +213,15 @@ async function ensurePracticeSession() {
   if (error) throw error;
 
   if (data) {
-    // 修复旧 session 可能存在的 totalQuestions 异常（曾出现过 675 的情况）
-    if (data.total_questions !== DEFAULT_TOTAL_QUESTIONS) {
+    // Normalize legacy sessions that may have invalid totals, progress, or score.
+    const normalizedSession = normalizePracticeSession(data);
+    if (normalizedSession) {
       const { error: fixError } = await supabase
         .from('practice_sessions')
-        .update({ total_questions: DEFAULT_TOTAL_QUESTIONS })
+        .update(normalizedSession)
         .eq('id', data.id);
       if (fixError) throw fixError;
-      data.total_questions = DEFAULT_TOTAL_QUESTIONS;
+      Object.assign(data, normalizedSession);
     }
     return data;
   }
@@ -498,18 +538,33 @@ app.post(
 app.get(
   '/api/mistakes',
   asyncRoute(async (req, res) => {
-    const subject = String(req.query.subject ?? '全部错题');
+    const allSubjectsLabel = '全部错题';
+    const subject = String(req.query.subject ?? allSubjectsLabel);
     const search = String(req.query.search ?? '').trim().toLowerCase();
     const offset = clamp(Number(req.query.offset ?? 0), 0, 10000);
     const limit = clamp(Number(req.query.limit ?? 10), 1, 50);
+    const from = offset;
+    const to = offset + limit - 1;
+
+    let mistakesQuery = supabase
+      .from('mistakes')
+      .select('*')
+      .eq('user_id', DEMO_USER_ID);
+
+    if (subject !== allSubjectsLabel) {
+      mistakesQuery = mistakesQuery.eq('subject', subject);
+    }
+
+    if (search) {
+      const escapedSearch = search.replaceAll('%', '\\%').replaceAll('_', '\\_');
+      mistakesQuery = mistakesQuery.or(
+        `subject.ilike.%${escapedSearch}%,question.ilike.%${escapedSearch}%,correct_answer.ilike.%${escapedSearch}%`,
+      );
+    }
 
     const [{ data: mistakes, error: mistakesError }, { data: weakPoints, error: weakPointsError }] =
       await Promise.all([
-        supabase
-          .from('mistakes')
-          .select('*')
-          .eq('user_id', DEMO_USER_ID)
-          .order('created_at', { ascending: false }),
+        mistakesQuery.order('created_at', { ascending: false }).range(from, to),
         supabase
           .from('topic_stats')
           .select('*')
@@ -520,18 +575,17 @@ app.get(
     if (mistakesError) throw mistakesError;
     if (weakPointsError) throw weakPointsError;
 
-    const filtered = (mistakes ?? []).filter((item: any) => {
-      const matchesSubject = subject === '全部错题' || item.subject === subject;
-      const haystack = `${item.subject} ${item.question} ${item.correct_answer} ${(item.tags ?? []).join(' ')}`.toLowerCase();
-      const matchesSearch = !search || haystack.includes(search);
-      return matchesSubject && matchesSearch;
-    });
+    const { data: subjectRows, error: subjectsError } = await supabase
+      .from('mistakes')
+      .select('subject')
+      .eq('user_id', DEMO_USER_ID);
+    if (subjectsError) throw subjectsError;
 
-    const subjects = Array.from(new Set((mistakes ?? []).map((item: any) => item.subject).filter(Boolean)));
+    const subjects = Array.from(new Set((subjectRows ?? []).map((item: any) => item.subject).filter(Boolean)));
 
     res.json({
-      tabs: ['全部错题', ...subjects],
-      mistakes: filtered.slice(offset, offset + limit).map(mapMistake),
+      tabs: [allSubjectsLabel, ...subjects],
+      mistakes: (mistakes ?? []).map(mapMistake),
       weakPoints: (weakPoints ?? []).map(mapWeakPoint),
     });
   }),
@@ -630,13 +684,6 @@ app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
 });
 
 if (process.env.NODE_ENV !== 'test') {
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`API server listening on http://localhost:${PORT}`);
-  });
-}
-
-export { app };
- (process.env.NODE_ENV !== 'test') {
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`API server listening on http://localhost:${PORT}`);
   });
