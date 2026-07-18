@@ -62,6 +62,23 @@ function getSupabaseClient() {
   return supabaseClient;
 }
 
+function createSupabaseAuthClient() {
+  const env = getSupabaseEnv();
+  const missingEnv = getMissingSupabaseEnv();
+
+  if (missingEnv.length > 0) {
+    throw new HttpError(500, `后端缺少环境变量：${missingEnv.join(', ')}`);
+  }
+
+  return createClient(env.url, env.serviceRoleKey, {
+    auth: {
+      autoRefreshToken: false,
+      detectSessionInUrl: false,
+      persistSession: false,
+    },
+  });
+}
+
 const supabase = new Proxy({} as SupabaseClientInstance, {
   get(_target, property) {
     const client = getSupabaseClient();
@@ -266,7 +283,7 @@ async function getAuthenticatedUser(req: Request): Promise<AuthenticatedUser> {
     throw new HttpError(401, '请先登录。');
   }
 
-  const { data, error } = await supabase.auth.getUser(token);
+  const { data, error } = await createSupabaseAuthClient().auth.getUser(token);
   if (error || !data.user) {
     throw new HttpError(401, '登录已过期，请重新登录。');
   }
@@ -421,7 +438,7 @@ app.post(
 
     await ensureProfile(createdUser.user.id, displayName);
 
-    const { data: signInData, error: signInError } = await supabase.auth.signInWithPassword({
+    const { data: signInData, error: signInError } = await createSupabaseAuthClient().auth.signInWithPassword({
       email,
       password,
     });
@@ -445,7 +462,7 @@ app.post(
       throw new HttpError(400, '请输入邮箱和密码。');
     }
 
-    const { data, error } = await supabase.auth.signInWithPassword({
+    const { data, error } = await createSupabaseAuthClient().auth.signInWithPassword({
       email,
       password,
     });
@@ -467,7 +484,7 @@ app.post(
       throw new HttpError(400, '缺少刷新令牌。');
     }
 
-    const { data, error } = await supabase.auth.refreshSession({
+    const { data, error } = await createSupabaseAuthClient().auth.refreshSession({
       refresh_token: refreshToken,
     });
 
