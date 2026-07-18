@@ -14,6 +14,13 @@ interface MockTable {
 const mockTables = vi.hoisted(() => new Map<string, MockTable>());
 const insertedRows = vi.hoisted(() => new Map<string, Record<string, unknown>[]>());
 const updatedCalls = vi.hoisted(() => new Map<string, Record<string, unknown>[]>());
+const authUser = vi.hoisted(() => ({
+  id: '00000000-0000-0000-0000-000000000001',
+  email: 'alex@example.com',
+  user_metadata: { display_name: 'Alex' },
+}));
+
+const AUTH_HEADER = 'Bearer mock-access-token';
 
 function setMockData(table: string, cfg: MockTable) {
   mockTables.set(table, cfg);
@@ -45,7 +52,7 @@ vi.mock('@supabase/supabase-js', () => {
       },
     };
 
-    const chainable = ['select', 'eq', 'order', 'limit', 'range', 'from'];
+    const chainable = ['select', 'eq', 'order', 'limit', 'range', 'from', 'or'];
     for (const m of chainable) {
       Object.defineProperty(self, m, { value: (..._args: unknown[]) => self, writable: false });
     }
@@ -114,7 +121,51 @@ vi.mock('@supabase/supabase-js', () => {
     return self;
   }
 
-  return { createClient: () => ({ from: (t: string) => qb(t) }) };
+  return {
+    createClient: () => ({
+      from: (t: string) => qb(t),
+      auth: {
+        getUser: async (token: string) =>
+          token === 'mock-access-token'
+            ? { data: { user: authUser }, error: null }
+            : { data: { user: null }, error: { message: 'invalid token' } },
+        signInWithPassword: async ({ email }: { email: string }) => ({
+          data: {
+            user: { ...authUser, email },
+            session: {
+              access_token: 'mock-access-token',
+              refresh_token: 'mock-refresh-token',
+              expires_at: 9999999999,
+            },
+          },
+          error: null,
+        }),
+        refreshSession: async () => ({
+          data: {
+            user: authUser,
+            session: {
+              access_token: 'mock-access-token',
+              refresh_token: 'mock-refresh-token',
+              expires_at: 9999999999,
+            },
+          },
+          error: null,
+        }),
+        admin: {
+          createUser: async ({
+            email,
+            user_metadata,
+          }: {
+            email: string;
+            user_metadata?: Record<string, unknown>;
+          }) => ({
+            data: { user: { ...authUser, email, user_metadata } },
+            error: null,
+          }),
+        },
+      },
+    }),
+  };
 });
 
 // ----- test suite -----
@@ -138,6 +189,30 @@ afterAll(() => { delete process.env.NODE_ENV; });
 
 // ---- tests ----
 
+describe('auth', () => {
+  test('rejects protected routes without a bearer token', async () => {
+    const res = await request(app).get('/api/dashboard');
+
+    expect(res.status).toBe(401);
+    expect(res.body.error).toMatch(/登录/);
+  });
+
+  test('logs in and returns an auth session', async () => {
+    const res = await request(app)
+      .post('/api/auth/login')
+      .send({ email: 'alex@example.com', password: 'secret1' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.accessToken).toBe('mock-access-token');
+    expect(res.body.refreshToken).toBe('mock-refresh-token');
+    expect(res.body.user).toMatchObject({
+      id: authUser.id,
+      email: 'alex@example.com',
+      displayName: 'Alex',
+    });
+  });
+});
+
 describe('GET /api/practice/session', () => {
   test('returns active session + question', async () => {
     setMockData('practice_sessions', {
@@ -157,7 +232,7 @@ describe('GET /api/practice/session', () => {
       },
     });
 
-    const res = await request(app).get('/api/practice/session');
+    const res = await request(app).get('/api/practice/session').set('Authorization', AUTH_HEADER);
     expect(res.status).toBe(200);
     expect(res.body.session.currentIndex).toBe(5);
     expect(res.body.session.totalQuestions).toBe(20);
@@ -185,7 +260,7 @@ describe('POST /api/practice/submit', () => {
     });
     setMockData('questions', { count: 4, single: baseQ });
 
-    const res = await request(app).post('/api/practice/submit')
+    const res = await request(app).post('/api/practice/submit').set('Authorization', AUTH_HEADER)
       .send({ questionId: 'q-1', selectedOption: 'A', scratchpad: '', isMarked: false, timeLeftSeconds: 200 });
 
     expect(res.status).toBe(200);
@@ -208,7 +283,7 @@ describe('POST /api/practice/submit', () => {
     });
     setMockData('questions', { count: 4, single: baseQ });
 
-    const res = await request(app).post('/api/practice/submit')
+    const res = await request(app).post('/api/practice/submit').set('Authorization', AUTH_HEADER)
       .send({ questionId: 'q-1', selectedOption: 'A', scratchpad: '', isMarked: false, timeLeftSeconds: 50 });
 
     expect(res.status).toBe(200);
@@ -231,7 +306,7 @@ describe('POST /api/practice/submit', () => {
     });
     setMockData('questions', { count: 4, single: { ...baseQ, id: 'q-session-3' } });
 
-    const res = await request(app).post('/api/practice/submit')
+    const res = await request(app).post('/api/practice/submit').set('Authorization', AUTH_HEADER)
       .send({ questionId: 'q-wrong', selectedOption: 'A', scratchpad: '', isMarked: false, timeLeftSeconds: 400 });
 
     expect(res.status).toBe(400);
@@ -257,7 +332,7 @@ describe('POST /api/practice/next-set', () => {
       },
     });
 
-    const res = await request(app).post('/api/practice/next-set');
+    const res = await request(app).post('/api/practice/next-set').set('Authorization', AUTH_HEADER);
     expect(res.status).toBe(200);
     expect(res.body.session.currentIndex).toBe(1);
     expect(res.body.session.totalQuestions).toBe(20);
@@ -280,7 +355,7 @@ describe('GET /api/dashboard', () => {
       list: [{ is_correct: true }, { is_correct: false }, { is_correct: true }],
     });
 
-    const res = await request(app).get('/api/dashboard');
+    const res = await request(app).get('/api/dashboard').set('Authorization', AUTH_HEADER);
     expect(res.status).toBe(200);
     expect(res.body.profile.displayName).toBe('Alex');
     expect(res.body.progress.completion).toBeGreaterThan(0);

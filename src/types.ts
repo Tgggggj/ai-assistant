@@ -1,5 +1,19 @@
 export type ViewState = 'home' | 'practice' | 'camera' | 'mistakes';
 
+export interface AuthUser {
+  id: string;
+  email: string | null;
+  displayName: string;
+}
+
+export interface AuthSession {
+  user: AuthUser;
+  accessToken: string;
+  refreshToken: string | null;
+  expiresAt: number | null;
+  isGuest?: boolean;
+}
+
 export interface Profile {
   id: string;
   displayName: string;

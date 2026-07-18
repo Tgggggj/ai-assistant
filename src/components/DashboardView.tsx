@@ -1,13 +1,14 @@
 import { BookOpen, BrainCircuit, Play, Search, TrendingUp } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { api } from '../lib/api';
-import { DashboardData, ViewState } from '../types';
+import { DashboardData, Profile, ViewState } from '../types';
 
 interface DashboardViewProps {
   onChangeView: (view: ViewState) => void;
+  onProfileChange?: (profile: Profile) => void;
 }
 
-export function DashboardView({ onChangeView }: DashboardViewProps) {
+export function DashboardView({ onChangeView, onProfileChange }: DashboardViewProps) {
   const [startingCourse, setStartingCourse] = useState(false);
   const [dashboard, setDashboard] = useState<DashboardData | null>(() => api.getDashboardSnapshot());
   const [userName, setUserName] = useState(() => api.getDashboardSnapshot().profile.displayName);
@@ -51,6 +52,7 @@ export function DashboardView({ onChangeView }: DashboardViewProps) {
       .updateProfile(nextName)
       .then((profile) => {
         setDashboard((current) => (current ? { ...current, profile } : current));
+        onProfileChange?.(profile);
         setError(null);
       })
       .catch((err: Error) => setError(err.message));

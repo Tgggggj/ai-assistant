@@ -9,7 +9,6 @@ dotenv.config({ path: '.env.local' });
 dotenv.config();
 
 const PORT = Number(process.env.PORT ?? 8787);
-const DEMO_USER_ID = process.env.DEMO_USER_ID ?? '00000000-0000-0000-0000-000000000001';
 const DEFAULT_TOTAL_QUESTIONS = 20;
 const DEFAULT_TIME_LEFT_SECONDS = 765;
 const QUESTION_COUNT_CACHE_TTL_MS = 60_000; // 1 分钟内复用，避免每次取题都 COUNT
@@ -19,6 +18,7 @@ const DEFAULT_CORS_ORIGINS = [
   'http://localhost:5173',
   'http://127.0.0.1:5173',
 ];
+const MIN_PASSWORD_LENGTH = 6;
 
 let cachedQuestionCount: { count: number; timestamp: number } | null = null;
 
@@ -65,6 +65,21 @@ app.use((req, res, next) => {
 });
 
 type AsyncRoute = (req: Request, res: Response, next: NextFunction) => Promise<void>;
+type AuthenticatedUser = {
+  id: string;
+  email: string | null;
+  displayName: string;
+};
+
+class HttpError extends Error {
+  readonly statusCode: number;
+
+  constructor(statusCode: number, message: string) {
+    super(message);
+    this.name = 'HttpError';
+    this.statusCode = statusCode;
+  }
+}
 
 function asyncRoute(route: AsyncRoute) {
   return (req: Request, res: Response, next: NextFunction) => {
@@ -162,6 +177,29 @@ function buildPracticeSummary(params: {
   };
 }
 
+function getDefaultDisplayName(user: any) {
+  const metadataName = String(user?.user_metadata?.display_name ?? '').trim();
+  if (metadataName) return metadataName;
+
+  const email = String(user?.email ?? '').trim();
+  if (email && email.includes('@')) return email.split('@')[0];
+
+  return 'Alex';
+}
+
+function mapAuthSession(user: any, session: any, profile: any) {
+  return {
+    user: {
+      id: user.id,
+      email: user.email ?? null,
+      displayName: profile.displayName,
+    },
+    accessToken: session.access_token,
+    refreshToken: session.refresh_token ?? null,
+    expiresAt: session.expires_at ?? null,
+  };
+}
+
 function normalizePracticeSession(row: any) {
   const normalized = {
     total_questions: DEFAULT_TOTAL_QUESTIONS,
@@ -180,11 +218,36 @@ function normalizePracticeSession(row: any) {
   return normalized;
 }
 
-async function ensureProfile() {
+function getBearerToken(req: Request) {
+  const header = req.headers.authorization ?? '';
+  const [scheme, token] = header.split(' ');
+  if (scheme?.toLowerCase() !== 'bearer' || !token) return null;
+  return token;
+}
+
+async function getAuthenticatedUser(req: Request): Promise<AuthenticatedUser> {
+  const token = getBearerToken(req);
+  if (!token) {
+    throw new HttpError(401, '请先登录。');
+  }
+
+  const { data, error } = await supabase.auth.getUser(token);
+  if (error || !data.user) {
+    throw new HttpError(401, '登录已过期，请重新登录。');
+  }
+
+  return {
+    id: data.user.id,
+    email: data.user.email ?? null,
+    displayName: getDefaultDisplayName(data.user),
+  };
+}
+
+async function ensureProfile(userId: string, displayName = 'Alex') {
   const { data, error } = await supabase
     .from('profiles')
     .select('id, display_name')
-    .eq('id', DEMO_USER_ID)
+    .eq('id', userId)
     .maybeSingle();
 
   if (error) throw error;
@@ -192,7 +255,7 @@ async function ensureProfile() {
 
   const { data: created, error: createError } = await supabase
     .from('profiles')
-    .insert({ id: DEMO_USER_ID, display_name: 'Alex' })
+    .insert({ id: userId, display_name: displayName })
     .select('id, display_name')
     .single();
 
@@ -200,11 +263,11 @@ async function ensureProfile() {
   return mapProfile(created);
 }
 
-async function ensurePracticeSession() {
+async function ensurePracticeSession(userId: string) {
   const { data, error } = await supabase
     .from('practice_sessions')
     .select('*')
-    .eq('user_id', DEMO_USER_ID)
+    .eq('user_id', userId)
     .eq('status', 'active')
     .order('updated_at', { ascending: false })
     .limit(1)
@@ -229,7 +292,7 @@ async function ensurePracticeSession() {
   const { data: created, error: createError } = await supabase
     .from('practice_sessions')
     .insert({
-      user_id: DEMO_USER_ID,
+      user_id: userId,
       total_questions: DEFAULT_TOTAL_QUESTIONS,
       current_index: 1,
       score: 0,
@@ -291,9 +354,120 @@ app.get('/api/health', (_req, res) => {
   });
 });
 
+app.post(
+  '/api/auth/register',
+  asyncRoute(async (req, res) => {
+    const email = String(req.body?.email ?? '').trim().toLowerCase();
+    const password = String(req.body?.password ?? '');
+    const displayName = String(req.body?.displayName ?? '').trim() || email.split('@')[0] || 'Alex';
+
+    if (!email || !email.includes('@')) {
+      throw new HttpError(400, '请输入有效邮箱。');
+    }
+
+    if (password.length < MIN_PASSWORD_LENGTH) {
+      throw new HttpError(400, `密码至少需要 ${MIN_PASSWORD_LENGTH} 位。`);
+    }
+
+    const { data: createdUser, error: createError } = await supabase.auth.admin.createUser({
+      email,
+      password,
+      email_confirm: true,
+      user_metadata: {
+        display_name: displayName,
+      },
+    });
+
+    if (createError || !createdUser.user) {
+      throw new HttpError(400, createError?.message ?? '注册失败，请稍后重试。');
+    }
+
+    await ensureProfile(createdUser.user.id, displayName);
+
+    const { data: signInData, error: signInError } = await supabase.auth.signInWithPassword({
+      email,
+      password,
+    });
+
+    if (signInError || !signInData.session || !signInData.user) {
+      throw new HttpError(400, signInError?.message ?? '注册成功，但登录失败，请手动登录。');
+    }
+
+    const profile = await ensureProfile(signInData.user.id, displayName);
+    res.status(201).json(mapAuthSession(signInData.user, signInData.session, profile));
+  }),
+);
+
+app.post(
+  '/api/auth/login',
+  asyncRoute(async (req, res) => {
+    const email = String(req.body?.email ?? '').trim().toLowerCase();
+    const password = String(req.body?.password ?? '');
+
+    if (!email || !password) {
+      throw new HttpError(400, '请输入邮箱和密码。');
+    }
+
+    const { data, error } = await supabase.auth.signInWithPassword({
+      email,
+      password,
+    });
+
+    if (error || !data.session || !data.user) {
+      throw new HttpError(401, '邮箱或密码不正确。');
+    }
+
+    const profile = await ensureProfile(data.user.id, getDefaultDisplayName(data.user));
+    res.json(mapAuthSession(data.user, data.session, profile));
+  }),
+);
+
+app.post(
+  '/api/auth/refresh',
+  asyncRoute(async (req, res) => {
+    const refreshToken = String(req.body?.refreshToken ?? '');
+    if (!refreshToken) {
+      throw new HttpError(400, '缺少刷新令牌。');
+    }
+
+    const { data, error } = await supabase.auth.refreshSession({
+      refresh_token: refreshToken,
+    });
+
+    if (error || !data.session || !data.user) {
+      throw new HttpError(401, '登录已过期，请重新登录。');
+    }
+
+    const profile = await ensureProfile(data.user.id, getDefaultDisplayName(data.user));
+    res.json(mapAuthSession(data.user, data.session, profile));
+  }),
+);
+
+app.get(
+  '/api/auth/me',
+  asyncRoute(async (req, res) => {
+    const user = await getAuthenticatedUser(req);
+    const profile = await ensureProfile(user.id, user.displayName);
+    res.json({
+      id: user.id,
+      email: user.email,
+      displayName: profile.displayName,
+    });
+  }),
+);
+
+app.post(
+  '/api/auth/logout',
+  asyncRoute(async (req, res) => {
+    await getAuthenticatedUser(req);
+    res.json({ ok: true });
+  }),
+);
+
 app.get(
   '/api/dashboard',
-  asyncRoute(async (_req, res) => {
+  asyncRoute(async (req, res) => {
+    const user = await getAuthenticatedUser(req);
     const [
       profile,
       { data: activities, error: activitiesError },
@@ -301,17 +475,17 @@ app.get(
       { count: questionCount, error: questionCountError },
       { data: attempts, error: attemptsError },
     ] = await Promise.all([
-      ensureProfile(),
+      ensureProfile(user.id, user.displayName),
       supabase
         .from('activities')
         .select('*')
-        .eq('user_id', DEMO_USER_ID)
+        .eq('user_id', user.id)
         .order('created_at', { ascending: false })
         .limit(5),
       supabase
         .from('daily_insights')
         .select('*')
-        .eq('user_id', DEMO_USER_ID)
+        .eq('user_id', user.id)
         .order('created_at', { ascending: false })
         .limit(1)
         .maybeSingle(),
@@ -321,7 +495,7 @@ app.get(
       supabase
         .from('answer_attempts')
         .select('is_correct')
-        .eq('user_id', DEMO_USER_ID),
+        .eq('user_id', user.id),
     ]);
 
     if (activitiesError) throw activitiesError;
@@ -333,7 +507,7 @@ app.get(
     const completion =
       attempts && attempts.length > 0
         ? clamp(Math.round((attempts.length / Math.max(completionBase, 1)) * 100), 1, 100)
-        : 75;
+        : 0;
 
     res.json({
       profile,
@@ -367,17 +541,18 @@ app.get(
 app.patch(
   '/api/profile',
   asyncRoute(async (req, res) => {
+    const user = await getAuthenticatedUser(req);
     const displayName = String(req.body?.displayName ?? '').trim();
     if (!displayName) {
       res.status(400).json({ error: '请输入用户名。' });
       return;
     }
 
-    await ensureProfile();
+    await ensureProfile(user.id, user.displayName);
     const { data, error } = await supabase
       .from('profiles')
       .update({ display_name: displayName })
-      .eq('id', DEMO_USER_ID)
+      .eq('id', user.id)
       .select('id, display_name')
       .single();
 
@@ -388,9 +563,10 @@ app.patch(
 
 app.get(
   '/api/practice/session',
-  asyncRoute(async (_req, res) => {
-    // 不调用 ensureProfile — profile 由 seed SQL 保证存在，且 ensurePracticeSession 创建时的 FK 约束自动兜底
-    const session = await ensurePracticeSession();
+  asyncRoute(async (req, res) => {
+    const user = await getAuthenticatedUser(req);
+    await ensureProfile(user.id, user.displayName);
+    const session = await ensurePracticeSession(user.id);
     const question = await getQuestionAtIndex(session.current_index);
 
     res.json({
@@ -403,6 +579,7 @@ app.get(
 app.post(
   '/api/practice/submit',
   asyncRoute(async (req, res) => {
+    const user = await getAuthenticatedUser(req);
     const questionId = String(req.body?.questionId ?? '');
     const selectedOption = String(req.body?.selectedOption ?? '');
     const scratchpad = String(req.body?.scratchpad ?? '');
@@ -414,7 +591,7 @@ app.post(
       return;
     }
 
-    const session = await ensurePracticeSession();
+    const session = await ensurePracticeSession(user.id);
     const question = await getQuestionAtIndex(session.current_index);
 
     // 服务端校验：确保提交的 questionId 确实是当前 session 的题目
@@ -427,7 +604,7 @@ app.post(
     const userAnswer = getSelectedAnswerText(question, selectedOption);
 
     const { error: attemptError } = await supabase.from('answer_attempts').insert({
-      user_id: DEMO_USER_ID,
+      user_id: user.id,
       question_id: question.id,
       selected_option: selectedOption,
       scratchpad,
@@ -439,7 +616,7 @@ app.post(
 
     if (!isCorrect) {
       const { error: mistakeError } = await supabase.from('mistakes').insert({
-        user_id: DEMO_USER_ID,
+        user_id: user.id,
         question_id: question.id,
         subject: question.subject,
         question: question.body,
@@ -469,7 +646,7 @@ app.post(
     if (sessionError) throw sessionError;
 
     const { error: activityError } = await supabase.from('activities').insert({
-      user_id: DEMO_USER_ID,
+      user_id: user.id,
       type: 'practice',
       title: `${question.subject}练习`,
       subtitle: `刚刚完成第 ${session.current_index} 题`,
@@ -500,21 +677,22 @@ app.post(
 
 app.post(
   '/api/practice/next-set',
-  asyncRoute(async (_req, res) => {
-    await ensureProfile();
+  asyncRoute(async (req, res) => {
+    const user = await getAuthenticatedUser(req);
+    await ensureProfile(user.id, user.displayName);
 
     const now = new Date().toISOString();
     const { error: closeError } = await supabase
       .from('practice_sessions')
       .update({ status: 'completed', completed_at: now })
-      .eq('user_id', DEMO_USER_ID)
+      .eq('user_id', user.id)
       .eq('status', 'active');
     if (closeError) throw closeError;
 
     const { data: session, error: createError } = await supabase
       .from('practice_sessions')
       .insert({
-        user_id: DEMO_USER_ID,
+        user_id: user.id,
         total_questions: DEFAULT_TOTAL_QUESTIONS,
         current_index: 1,
         score: 0,
@@ -538,6 +716,7 @@ app.post(
 app.get(
   '/api/mistakes',
   asyncRoute(async (req, res) => {
+    const user = await getAuthenticatedUser(req);
     const allSubjectsLabel = '全部错题';
     const subject = String(req.query.subject ?? allSubjectsLabel);
     const search = String(req.query.search ?? '').trim().toLowerCase();
@@ -549,7 +728,7 @@ app.get(
     let mistakesQuery = supabase
       .from('mistakes')
       .select('*')
-      .eq('user_id', DEMO_USER_ID);
+      .eq('user_id', user.id);
 
     if (subject !== allSubjectsLabel) {
       mistakesQuery = mistakesQuery.eq('subject', subject);
@@ -568,7 +747,7 @@ app.get(
         supabase
           .from('topic_stats')
           .select('*')
-          .eq('user_id', DEMO_USER_ID)
+          .eq('user_id', user.id)
           .order('accuracy', { ascending: true }),
       ]);
 
@@ -578,7 +757,7 @@ app.get(
     const { data: subjectRows, error: subjectsError } = await supabase
       .from('mistakes')
       .select('subject')
-      .eq('user_id', DEMO_USER_ID);
+      .eq('user_id', user.id);
     if (subjectsError) throw subjectsError;
 
     const subjects = Array.from(new Set((subjectRows ?? []).map((item: any) => item.subject).filter(Boolean)));
@@ -593,11 +772,12 @@ app.get(
 
 app.get(
   '/api/camera/analysis',
-  asyncRoute(async (_req, res) => {
+  asyncRoute(async (req, res) => {
+    const user = await getAuthenticatedUser(req);
     const { data, error } = await supabase
       .from('scan_results')
       .select('*')
-      .eq('user_id', DEMO_USER_ID)
+      .eq('user_id', user.id)
       .order('created_at', { ascending: false })
       .limit(1)
       .maybeSingle();
@@ -615,8 +795,9 @@ app.get(
 app.post(
   '/api/mistakes/from-scan',
   asyncRoute(async (req, res) => {
+    const user = await getAuthenticatedUser(req);
     const analysisId = String(req.body?.analysisId ?? '');
-    const query = supabase.from('scan_results').select('*').eq('user_id', DEMO_USER_ID);
+    const query = supabase.from('scan_results').select('*').eq('user_id', user.id);
     const { data, error } = analysisId
       ? await query.eq('id', analysisId).single()
       : await query.order('created_at', { ascending: false }).limit(1).single();
@@ -626,7 +807,7 @@ app.post(
     const { data: created, error: createError } = await supabase
       .from('mistakes')
       .insert({
-        user_id: DEMO_USER_ID,
+        user_id: user.id,
         subject: '数学',
         question: data.recognized_text,
         user_answer: '拍照搜题收录',
@@ -645,7 +826,8 @@ app.post(
 
 app.post(
   '/api/camera/search-similar',
-  asyncRoute(async (_req, res) => {
+  asyncRoute(async (req, res) => {
+    await getAuthenticatedUser(req);
     const { data, error } = await supabase
       .from('questions')
       .select('id, subject, body, correct_answer')
@@ -679,8 +861,9 @@ if (fs.existsSync(indexHtml)) {
 
 app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
   const message = error instanceof Error ? error.message : '服务器内部错误';
+  const statusCode = error instanceof HttpError ? error.statusCode : 500;
   console.error(error);
-  res.status(500).json({ error: message });
+  res.status(statusCode).json({ error: message });
 });
 
 if (process.env.NODE_ENV !== 'test') {

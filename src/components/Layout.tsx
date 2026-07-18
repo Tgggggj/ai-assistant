@@ -1,21 +1,23 @@
 import {
-  Bell,
   BookOpen,
   BookX,
   Camera,
   Home,
+  LogOut,
   User,
 } from 'lucide-react';
 import React from 'react';
-import { ViewState } from '../types';
+import { AuthUser, ViewState } from '../types';
 
 interface LayoutProps {
   currentView: ViewState;
   onChangeView: (view: ViewState) => void;
+  user: AuthUser;
+  onLogout: () => void;
   children: React.ReactNode;
 }
 
-export function Layout({ currentView, onChangeView, children }: LayoutProps) {
+export function Layout({ currentView, onChangeView, user, onLogout, children }: LayoutProps) {
   const navItems = [
     { id: 'home', label: '首页', icon: Home },
     { id: 'practice', label: '练习', icon: BookOpen },
@@ -33,8 +35,12 @@ export function Layout({ currentView, onChangeView, children }: LayoutProps) {
           </div>
           <span className="text-xl font-bold text-primary">笔试AI助手</span>
         </div>
-        <button className="w-10 h-10 flex items-center justify-center rounded-full hover:bg-surface-container-high transition-colors text-primary">
-          <Bell className="w-5 h-5" />
+        <button
+          onClick={onLogout}
+          className="w-10 h-10 flex items-center justify-center rounded-full hover:bg-surface-container-high transition-colors text-primary"
+          title="退出登录"
+        >
+          <LogOut className="w-5 h-5" />
         </button>
       </header>
 
@@ -62,6 +68,24 @@ export function Layout({ currentView, onChangeView, children }: LayoutProps) {
             );
           })}
         </nav>
+        <div className="p-4 border-t border-outline-variant/30">
+          <div className="flex items-center gap-3 px-3 py-3 rounded-xl bg-surface-container">
+            <div className="w-9 h-9 rounded-full bg-primary-container text-on-primary-container flex items-center justify-center shrink-0">
+              <User className="w-5 h-5" />
+            </div>
+            <div className="min-w-0 flex-1">
+              <p className="text-sm font-semibold text-primary truncate">{user.displayName}</p>
+              <p className="text-xs text-on-surface-variant truncate">{user.email ?? '已登录'}</p>
+            </div>
+            <button
+              onClick={onLogout}
+              className="w-8 h-8 rounded-lg flex items-center justify-center text-on-surface-variant hover:text-primary hover:bg-surface-container-high transition-colors"
+              title="退出登录"
+            >
+              <LogOut className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
       </aside>
 
       {/* Main Content Area */}

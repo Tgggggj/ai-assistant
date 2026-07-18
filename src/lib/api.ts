@@ -1,4 +1,6 @@
 import type {
+  AuthSession,
+  AuthUser,
   CameraAnalysis,
   DashboardData,
   MistakeItem,
@@ -20,6 +22,18 @@ const importMeta = import.meta as unknown as {
 const API_BASE_URL = importMeta.env?.VITE_API_BASE_URL ?? '/api';
 const API_TIMEOUT_MS = Number(importMeta.env?.VITE_API_TIMEOUT_MS ?? 25000);
 const ENABLE_LOCAL_FALLBACK = importMeta.env?.VITE_ENABLE_LOCAL_FALLBACK !== 'false';
+const AUTH_STORAGE_KEY = 'practice-ai-auth-session';
+const GUEST_SESSION: AuthSession = {
+  user: {
+    id: 'guest-user',
+    email: null,
+    displayName: '游客',
+  },
+  accessToken: '',
+  refreshToken: null,
+  expiresAt: null,
+  isGuest: true,
+};
 
 type LocalQuestion = PracticeQuestion & {
   correctOption: string;
@@ -241,6 +255,39 @@ function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
+function readStoredAuthSession(): AuthSession | null {
+  if (typeof window === 'undefined') return null;
+
+  try {
+    const raw = window.localStorage.getItem(AUTH_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as AuthSession;
+    if (!parsed?.user) return null;
+    return parsed.isGuest || parsed.accessToken ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+let authSession: AuthSession | null = readStoredAuthSession();
+
+function persistAuthSession(nextSession: AuthSession | null) {
+  authSession = nextSession;
+  if (typeof window === 'undefined') return;
+
+  if (nextSession) {
+    window.localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(nextSession));
+  } else {
+    window.localStorage.removeItem(AUTH_STORAGE_KEY);
+  }
+}
+
+function getAuthHeaders(headers: Headers) {
+  if (!authSession?.isGuest && authSession?.accessToken && !headers.has('Authorization')) {
+    headers.set('Authorization', `Bearer ${authSession.accessToken}`);
+  }
+}
+
 function getLocalDashboardSnapshot() {
   return clone(localDashboardData);
 }
@@ -373,6 +420,7 @@ function getLocalMistakes(params: { subject?: string; search?: string; offset?: 
 async function request<T>(path: string, init?: RequestInit, timeoutMs = API_TIMEOUT_MS): Promise<T> {
   const headers = new Headers(init?.headers);
   if (!headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
+  getAuthHeaders(headers);
 
   const controller = new AbortController();
   const timeoutId = timeoutMs > 0 ? window.setTimeout(() => controller.abort(), timeoutMs) : null;
@@ -397,6 +445,7 @@ async function request<T>(path: string, init?: RequestInit, timeoutMs = API_TIME
       } catch {
         // Keep the HTTP status message when the response is not JSON.
       }
+      if (response.status === 401) persistAuthSession(null);
       throw new ApiRequestError(message, { status: response.status, canUseFallback: false });
     }
 
@@ -429,6 +478,10 @@ async function requestWithFallback<T>(
   fallback: () => T,
   timeoutMs = API_TIMEOUT_MS,
 ): Promise<T> {
+  if (authSession?.isGuest) {
+    return fallback();
+  }
+
   try {
     return await request<T>(path, init, timeoutMs);
   } catch (error) {
@@ -440,6 +493,99 @@ async function requestWithFallback<T>(
 }
 
 export const api = {
+  getAuthSessionSnapshot() {
+    return authSession;
+  },
+
+  clearAuthSession() {
+    persistAuthSession(null);
+  },
+
+  startGuestSession() {
+    const session = clone(GUEST_SESSION);
+    persistAuthSession(session);
+    return session;
+  },
+
+  async register(payload: { email: string; password: string; displayName: string }) {
+    const session = await request<AuthSession>(
+      '/auth/register',
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      },
+      Math.max(API_TIMEOUT_MS, 5000),
+    );
+    persistAuthSession(session);
+    return session;
+  },
+
+  async login(payload: { email: string; password: string }) {
+    const session = await request<AuthSession>(
+      '/auth/login',
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      },
+      Math.max(API_TIMEOUT_MS, 5000),
+    );
+    persistAuthSession(session);
+    return session;
+  },
+
+  async refreshAuthSession() {
+    if (!authSession?.refreshToken) return null;
+
+    const session = await request<AuthSession>(
+      '/auth/refresh',
+      {
+        method: 'POST',
+        body: JSON.stringify({ refreshToken: authSession.refreshToken }),
+        headers: {
+          Authorization: `Bearer ${authSession.accessToken}`,
+        },
+      },
+      Math.max(API_TIMEOUT_MS, 5000),
+    );
+    persistAuthSession(session);
+    return session;
+  },
+
+  async getCurrentUser() {
+    if (!authSession) return null;
+    if (authSession.isGuest) return authSession.user;
+
+    const user = await request<AuthUser>('/auth/me', undefined, Math.max(API_TIMEOUT_MS, 5000));
+    authSession = {
+      ...authSession,
+      user,
+    };
+    persistAuthSession(authSession);
+    return user;
+  },
+
+  async logout() {
+    const session = authSession;
+    persistAuthSession(null);
+
+    if (!session?.accessToken || session.isGuest) return;
+
+    try {
+      await request<{ ok: boolean }>(
+        '/auth/logout',
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${session.accessToken}`,
+          },
+        },
+        Math.max(API_TIMEOUT_MS, 3000),
+      );
+    } catch {
+      // Local logout already happened; server logout is best-effort.
+    }
+  },
+
   getDashboardSnapshot: getLocalDashboardSnapshot,
 
   getDashboard() {
@@ -461,6 +607,15 @@ export const api = {
             displayName,
           },
         };
+        if (authSession?.isGuest) {
+          persistAuthSession({
+            ...authSession,
+            user: {
+              ...authSession.user,
+              displayName,
+            },
+          });
+        }
         return clone(localDashboardData.profile);
       },
       Math.max(API_TIMEOUT_MS, 2500),
